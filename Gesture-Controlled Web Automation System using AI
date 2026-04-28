@@ -1,0 +1,100 @@
+import cv2
+import mediapipe as mp
+import socket
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import time
+
+receiver_ip = '127.0.0.1'
+receiver_port = 9999
+
+# Setup socket to receive answers
+server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server_socket.bind((receiver_ip, receiver_port))
+server_socket.listen(1)
+print("[Client] Waiting for server to send answers...")
+conn, addr = server_socket.accept()
+answers_raw = conn.recv(4096).decode()
+answers = answers_raw.split('|')
+print("[Client] Received answers:", answers)
+conn.close()
+server_socket.close()
+
+# Start camera for hand sign
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(max_num_hands=1)
+mp_draw = mp.solutions.drawing_utils
+cap = cv2.VideoCapture(0)
+
+clicked = False
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    frame = cv2.flip(frame, 1)
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    res = hands.process(rgb)
+
+    if res.multi_hand_landmarks:
+        for hand_landmarks in res.multi_hand_landmarks:
+            mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+            lm = hand_landmarks.landmark
+            finger_states = []
+
+            finger_states.append(1 if lm[4].x < lm[3].x else 0)
+            for tip in [8,12,16,20]:
+                finger_states.append(1 if lm[tip].y < lm[tip-2].y else 0)
+
+            # Open hand detected
+            if finger_states == [1,1,1,1,1] and not clicked:
+                print("🖐 Open hand detected - auto answer starting...")
+                clicked = True
+
+                options = webdriver.ChromeOptions()
+                options.add_argument(r"user-data-dir=C:\chrome-profile")
+                driver = webdriver.Chrome(options=options)
+                driver.get('https://www.coursera.org/learn/intro-cyber-attacks/assignment-submission/bLFCT/module-1-quiz/attempt')
+
+                wait = WebDriverWait(driver, 20)
+                radiogroups = wait.until(EC.presence_of_all_elements_located((By.XPATH, "//div[@role='radiogroup']")))
+                print(f"Found {len(radiogroups)} questions")
+
+                for idx, rg in enumerate(radiogroups):
+                    print(f"\n Question {idx+1}")
+                    labels = rg.find_elements(By.XPATH, ".//label")
+                    found = False
+                    for label in labels:
+                        option_text = label.find_element(By.XPATH, ".//span[contains(@class,'font-weight-normal')]").text.strip()
+                        print("Option:", option_text)
+                        if answers[idx].strip().lower() in option_text.lower():
+                            print(" Match found! Clicking...")
+                            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", label)
+                            time.sleep(0.2)
+                            input_el = label.find_element(By.TAG_NAME, "input")
+                            driver.execute_script("""
+                                arguments[0].click();
+                                const evt = new Event('change', { bubbles: true });
+                                arguments[0].dispatchEvent(evt);
+                            """, input_el)
+                            found = True
+                            break
+                    if not found:
+                        print(" Correct answer not found for question", idx+1)
+
+                submit_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Submit')]")))
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", submit_btn)
+                time.sleep(0.3)
+                driver.execute_script("arguments[0].click();", submit_btn)
+                print(" Submitted successfully!")
+
+    cv2.imshow("Client - Show Open Hand to Submit", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
